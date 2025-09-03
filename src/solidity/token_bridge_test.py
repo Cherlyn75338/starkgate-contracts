@@ -109,6 +109,7 @@ def test_eth_withdraw_reentrancy_batches_multiple_messages(
     eth_test_utils: EthTestUtils,
     messaging_contract: EthContract,
     registry_contract: EthContract,
+    limit_enabled: bool,
 ):
     # Only for ETH bridge (reentrancy surface)
     wrapper = EthBridgeWrapper(
