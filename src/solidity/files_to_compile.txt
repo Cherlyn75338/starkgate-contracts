@@ -14,3 +14,4 @@ starkware/starknet/testing/MockStarknetMessaging.sol
 src/solidity/StarkgateUpgradeAssistExternalInitializer.sol
 src/solidity/ConfigureSingleBridgeEIC.sol
 src/solidity/test_contracts/TestFees.sol
+src/solidity/test_contracts/ReentrantWithdrawer.sol

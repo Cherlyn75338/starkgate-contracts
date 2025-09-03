@@ -16,6 +16,7 @@ from solidity.conftest import (
     HANDLE_TOKEN_DEPLOYMENT_SELECTOR,
     TOKEN_ADDRESS,
 )
+from solidity.test_contracts import ReentrantWithdrawer
 
 from starkware.starknet.services.api.messages import (
     StarknetMessageToL1,
@@ -85,6 +86,70 @@ def setup_contracts(
     """
     token_bridge_wrapper.set_bridge_balance(initial_bridge_balance)
     token_bridge_wrapper.contract.setL2TokenBridge.transact(L2_TOKEN_CONTRACT)
+
+def register_multiple_l1_withdrawals(
+    token_bridge_wrapper: TokenBridgeWrapper, messaging_contract: EthContract, amounts: list[int], recipient: str
+):
+    for amt in amounts:
+        messaging_contract.mockSendMessageFromL2.transact(
+            L2_TOKEN_CONTRACT,
+            int(token_bridge_wrapper.contract.address, 16),
+            [
+                WITHDRAW,
+                int(recipient, 16),
+                int(token_bridge_wrapper.token_address(), 16),
+                amt % 2**128,
+                amt // 2**128,
+            ],
+        )
+
+
+@pytest.mark.parametrize("limit_enabled", [False, True])
+def test_eth_withdraw_reentrancy_batches_multiple_messages(
+    eth_test_utils: EthTestUtils,
+    messaging_contract: EthContract,
+    registry_contract: EthContract,
+    limit_enabled: bool,
+):
+    # Only for ETH bridge (reentrancy surface)
+    wrapper = EthBridgeWrapper(
+        messaging_contract=messaging_contract, registry_contract=registry_contract, eth_test_utils=eth_test_utils
+    )
+    setup_contracts(token_bridge_wrapper=wrapper, initial_bridge_balance=10**18)
+    # Deploy reentrant recipient contract
+    attacker = eth_test_utils.accounts[0].deploy(
+        ReentrantWithdrawer, wrapper.contract.address, wrapper.token_address()
+    )
+    # Prepare N distinct withdraw messages to attacker
+    amounts = [1, 2, 3, 4, 5]
+    total = sum(amounts)
+    register_multiple_l1_withdrawals(wrapper, messaging_contract, amounts, attacker.address)
+
+    # Optionally enable withdrawal limit
+    if limit_enabled:
+        wrapper.enable_withdrawal_limit()
+        # Ensure remaining allowance is sufficient for total
+        remaining = wrapper.get_remaining_intraday_allowance()
+        if remaining < total:
+            # Top up bridge so allowance computed is large enough on first use
+            wrapper.set_bridge_balance(remaining + 10**18)
+
+    # Set sequence and trigger reentrant batch in a single tx
+    attacker.setSequence.transact(amounts)
+    attack_receipt = attacker.attack.transact()
+
+    # Assert all messages consumed and funds transferred
+    assert wrapper.get_bridge_balance() >= 0
+    # Check attacker received total
+    assert eth_test_utils.get_balance(attacker.address) >= total
+
+    # All withdrawals were emitted within the single attack tx (reentrancy)
+    withdrawal_events = wrapper.contract.get_events(tx=attack_receipt, name="Withdrawal")
+    assert len(withdrawal_events) == len(amounts)
+    # Verify consuming the same messages again fails
+    for amt in amounts:
+        with pytest.raises(EthRevertException, match="INVALID_MESSAGE_TO_CONSUME"):
+            wrapper.contract.withdraw.call(wrapper.token_address(), amt, attacker.address)
 
 
 def test_selectors():
